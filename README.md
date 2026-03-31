@@ -60,12 +60,27 @@ The bridge prints a URL and token on startup:
 
 ## Connect AgentZero
 
-1. Open AgentZero on your iPhone, iPad, or Mac
-2. Go to **Settings > Providers > Hermes Agent**
-3. Enter your **Bridge URL** (use your machine's local IP if on the same network, e.g., `http://192.168.1.50:8642/v1/chat/completions`)
-4. Enter your **Bridge Token**
-5. Tap **Verify & Save**
-6. Select **Hermes Agent** from the model picker and start chatting
+### From your Mac (same machine)
+
+Use `http://127.0.0.1:8642/v1/chat/completions` as the Bridge URL — it just works.
+
+### From your iPhone or iPad
+
+You need a way for your phone to reach the bridge on your computer. **Tailscale is the recommended approach** — it creates an encrypted private network between your devices that works over WiFi and cellular, with zero port forwarding or configuration.
+
+1. Install [Tailscale](https://tailscale.com) on your computer and your phone (free for personal use)
+2. Start the bridge with `--host 0.0.0.0` (already in the Quick Start above)
+3. Find your computer's Tailscale IP (e.g., `100.x.x.x`) in the Tailscale app
+4. In AgentZero, go to **Settings > Providers > Hermes Agent**
+5. Enter `http://100.x.x.x:8642/v1/chat/completions` as the **Bridge URL**
+6. Paste the **Bridge Token** from the terminal
+7. Tap **Verify & Save**
+8. Select **Hermes Agent** from the model picker and start chatting
+
+**Other options:**
+- **Same WiFi only:** Use your machine's local IP (e.g., `http://192.168.1.50:8642/v1/chat/completions`)
+- **ngrok:** `ngrok http 8642` for a public HTTPS URL (free tier available)
+- **Reverse proxy:** Put it behind nginx/Caddy with HTTPS
 
 ## Options
 
@@ -73,15 +88,6 @@ The bridge prints a URL and token on startup:
 ~/.hermes/hermes-agent/venv/bin/python3 bridge.py --port 9000        # Custom port (default: 8642)
 ~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0     # Listen on all interfaces (default: 127.0.0.1)
 ```
-
-## Remote Access
-
-By default, the bridge listens on `127.0.0.1` (localhost only). To access it from your phone:
-
-- **Same network:** Use `--host 0.0.0.0` and your machine's local IP
-- **Tailscale:** Install on both devices for a private network with zero config
-- **ngrok:** `ngrok http 8642` for a public URL (free tier available)
-- **Reverse proxy:** Put it behind nginx/Caddy with HTTPS
 
 ## API Reference
 
