@@ -23,19 +23,24 @@ The bridge is a single Python file (~350 lines) that:
 
 ## Quick Start
 
-**Prerequisites:** [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) installed and configured, Python 3.10+.
+**Prerequisites:** [Hermes Agent](https://hermes-agent.nousresearch.com/docs/getting-started/quickstart) installed and configured.
 
 ```bash
-# 1. Clone or download
+# 1. Install Hermes Agent (if you haven't already)
+curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash
+
+# 2. Clone or download
 git clone https://github.com/m1insights/hermes-bridge.git
 cd hermes-bridge
 
-# 2. Install dependencies
-pip install -r requirements.txt
+# 3. Install bridge dependencies into Hermes's environment
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 fastapi uvicorn
 
-# 3. Start the bridge
-python bridge.py
+# 4. Start the bridge
+~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0
 ```
+
+> **Why Hermes's Python?** The bridge imports Hermes Agent directly as a library. It must run inside the same Python environment where Hermes is installed (`~/.hermes/hermes-agent/venv`). The Hermes installer includes `uv`, so step 3 should just work.
 
 The bridge prints a URL and token on startup:
 
@@ -65,8 +70,8 @@ The bridge prints a URL and token on startup:
 ## Options
 
 ```bash
-python bridge.py --port 9000        # Custom port (default: 8642)
-python bridge.py --host 0.0.0.0     # Listen on all interfaces (default: 127.0.0.1)
+~/.hermes/hermes-agent/venv/bin/python3 bridge.py --port 9000        # Custom port (default: 8642)
+~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0     # Listen on all interfaces (default: 127.0.0.1)
 ```
 
 ## Remote Access
