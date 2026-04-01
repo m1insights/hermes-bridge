@@ -62,23 +62,28 @@ The bridge prints a URL and token on startup:
 
 ### From your Mac (same machine)
 
-Use `http://127.0.0.1:8642/v1/chat/completions` as the Bridge URL — it just works.
+Paste `127.0.0.1` as the Bridge URL in AgentZero. The app handles the rest.
 
 ### From your iPhone or iPad
 
-You need a way for your phone to reach the bridge on your computer. **Tailscale is the recommended approach** — it creates an encrypted private network between your devices that works over WiFi and cellular, with zero port forwarding or configuration.
+iOS requires HTTPS. The simplest way is **Tailscale Serve** — it gives your machine a real HTTPS URL with a valid certificate, accessible over WiFi or cellular.
 
 1. Install [Tailscale](https://tailscale.com) on your computer and your phone (free for personal use)
 2. Start the bridge with `--host 0.0.0.0` (already in the Quick Start above)
-3. Find your computer's Tailscale IP (e.g., `100.x.x.x`) in the Tailscale app
+3. Enable HTTPS by running in a second terminal:
+   ```bash
+   tailscale serve 8642
+   ```
+   This prints a URL like `https://my-mac.tail1234.ts.net`
 4. In AgentZero, go to **Settings > Providers > Hermes Agent**
-5. Enter `http://100.x.x.x:8642/v1/chat/completions` as the **Bridge URL**
+5. Paste your **`.ts.net` hostname** (e.g., `my-mac.tail1234.ts.net`) as the Bridge URL
 6. Paste the **Bridge Token** from the terminal
 7. Tap **Verify & Save**
 8. Select **Hermes Agent** from the model picker and start chatting
 
+> **Why Tailscale Serve?** iOS enforces HTTPS for all connections. Tailscale Serve auto-provisions a real CA-signed certificate for your machine — no self-signed certs, no port forwarding, no ATS issues. Works over WiFi and cellular.
+
 **Other options:**
-- **Same WiFi only:** Use your machine's local IP (e.g., `http://192.168.1.50:8642/v1/chat/completions`)
 - **ngrok:** `ngrok http 8642` for a public HTTPS URL (free tier available)
 - **Reverse proxy:** Put it behind nginx/Caddy with HTTPS
 
