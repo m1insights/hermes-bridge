@@ -12,6 +12,8 @@ import asyncio
 import json
 import os
 import secrets
+import ssl
+import subprocess
 import sys
 import time
 import uuid
@@ -42,8 +44,34 @@ except ImportError:
 
 CONFIG_DIR = Path.home() / ".hermes"
 CONFIG_PATH = CONFIG_DIR / "bridge.json"
+CERT_PATH = CONFIG_DIR / "bridge-cert.pem"
+KEY_PATH = CONFIG_DIR / "bridge-key.pem"
 
 MODEL_ID = "hermes-agent"
+
+
+def ensure_self_signed_cert() -> tuple[str, str]:
+    """Generate a self-signed TLS certificate if one doesn't exist."""
+    if CERT_PATH.exists() and KEY_PATH.exists():
+        return str(CERT_PATH), str(KEY_PATH)
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", str(KEY_PATH),
+            "-out", str(CERT_PATH),
+            "-days", "3650",
+            "-nodes",
+            "-subj", "/CN=hermes-bridge",
+            "-addext", "subjectAltName=IP:127.0.0.1,IP:0.0.0.0",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    return str(CERT_PATH), str(KEY_PATH)
 
 
 def load_config(port_override: Optional[int] = None) -> dict:
@@ -96,12 +124,51 @@ def verify_token(authorization: Optional[str], expected_token: str) -> None:
 
 _agent: Optional[AIAgent] = None
 
+HERMES_CONFIG_PATH = CONFIG_DIR / "config.yaml"
+
+
+def _read_hermes_provider() -> dict:
+    """Read provider and model from Hermes config.yaml."""
+    result = {}
+    if not HERMES_CONFIG_PATH.exists():
+        return result
+    try:
+        # Minimal YAML parsing — avoid pulling in pyyaml dependency
+        text = HERMES_CONFIG_PATH.read_text()
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("provider:") and "provider:" in line and not line.startswith(" "):
+                # Top-level provider under model: section — but we need the one
+                # directly under "model:". Use simple state tracking.
+                pass
+        # More reliable: look for the model.provider pattern
+        in_model = False
+        for line in text.splitlines():
+            if line.startswith("model:"):
+                in_model = True
+                continue
+            if in_model and not line.startswith(" "):
+                in_model = False
+            if in_model and "provider:" in line:
+                val = line.split("provider:", 1)[1].strip()
+                if val:
+                    result["provider"] = val
+                break
+    except Exception:
+        pass
+    return result
+
 
 def get_agent() -> AIAgent:
     """Return the shared AIAgent instance, creating it on first call."""
     global _agent
     if _agent is None:
-        _agent = AIAgent(quiet_mode=True)
+        hermes_cfg = _read_hermes_provider()
+        provider = hermes_cfg.get("provider")
+        kwargs = {"quiet_mode": True}
+        if provider:
+            kwargs["provider"] = provider
+        _agent = AIAgent(**kwargs)
     return _agent
 
 
@@ -348,11 +415,12 @@ def main():
     print("  Hermes Agent Bridge")
     print("=" * 56)
     print()
-    print(f"  URL:    http://{args.host}:{port}/v1")
+    print(f"  Local:  http://{args.host}:{port}/v1")
     print(f"  Token:  {token}")
     print()
-    print("  Paste these into AgentZero > Settings > Providers")
-    print("  to connect via BYOK (OpenAI-compatible).")
+    print("  For mobile access, run:")
+    print(f"    tailscale serve {port}")
+    print("  Then use your https://<machine>.ts.net URL in AgentZero.")
     print()
     print("=" * 56)
 
