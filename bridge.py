@@ -9,11 +9,12 @@ can talk to a local Hermes Agent instance over HTTP.
 
 import argparse
 import asyncio
+import collections
+import hmac
 import json
-import os
+import threading
 import secrets
-import ssl
-import subprocess
+import stat
 import sys
 import time
 import uuid
@@ -44,34 +45,7 @@ except ImportError:
 
 CONFIG_DIR = Path.home() / ".hermes"
 CONFIG_PATH = CONFIG_DIR / "bridge.json"
-CERT_PATH = CONFIG_DIR / "bridge-cert.pem"
-KEY_PATH = CONFIG_DIR / "bridge-key.pem"
-
 MODEL_ID = "hermes-agent"
-
-
-def ensure_self_signed_cert() -> tuple[str, str]:
-    """Generate a self-signed TLS certificate if one doesn't exist."""
-    if CERT_PATH.exists() and KEY_PATH.exists():
-        return str(CERT_PATH), str(KEY_PATH)
-
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-    subprocess.run(
-        [
-            "openssl", "req", "-x509", "-newkey", "rsa:2048",
-            "-keyout", str(KEY_PATH),
-            "-out", str(CERT_PATH),
-            "-days", "3650",
-            "-nodes",
-            "-subj", "/CN=hermes-bridge",
-            "-addext", "subjectAltName=IP:127.0.0.1,IP:0.0.0.0",
-        ],
-        check=True,
-        capture_output=True,
-    )
-
-    return str(CERT_PATH), str(KEY_PATH)
 
 
 def load_config(port_override: Optional[int] = None) -> dict:
@@ -98,7 +72,10 @@ def load_config(port_override: Optional[int] = None) -> dict:
 
     if changed:
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-        CONFIG_PATH.write_text(json.dumps(config, indent=2) + "\n")
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config, indent=2) + "\n")
+        tmp.chmod(stat.S_IRUSR | stat.S_IWUSR)  # 0o600 — owner read/write only
+        tmp.replace(CONFIG_PATH)
 
     return config
 
@@ -108,12 +85,24 @@ def load_config(port_override: Optional[int] = None) -> dict:
 # ---------------------------------------------------------------------------
 
 
-def verify_token(authorization: Optional[str], expected_token: str) -> None:
-    """Validate Bearer token or raise 401."""
+def _client_ip(request: Request) -> str:
+    """Extract client IP from the request."""
+    return request.client.host if request.client else "unknown"
+
+
+def verify_token(authorization: Optional[str], expected_token: str, client_ip: str = "unknown") -> None:
+    """Validate Bearer token or raise 401. Tracks failed auth attempts per IP."""
+    failed = False
     if not authorization:
-        raise HTTPException(status_code=401, detail="Missing Authorization header")
-    parts = authorization.split(" ", 1)
-    if len(parts) != 2 or parts[0].lower() != "bearer" or parts[1] != expected_token:
+        failed = True
+    else:
+        parts = authorization.split(" ", 1)
+        if len(parts) != 2 or parts[0].lower() != "bearer" or not hmac.compare_digest(parts[1], expected_token):
+            failed = True
+
+    if failed:
+        if not _auth_fail_limiter.allow(client_ip):
+            raise HTTPException(status_code=429, detail="Too many failed attempts")
         raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 
@@ -123,6 +112,7 @@ def verify_token(authorization: Optional[str], expected_token: str) -> None:
 
 
 _agent: Optional[AIAgent] = None
+_agent_lock = threading.Lock()
 
 HERMES_CONFIG_PATH = CONFIG_DIR / "config.yaml"
 
@@ -162,13 +152,16 @@ def _read_hermes_provider() -> dict:
 def get_agent() -> AIAgent:
     """Return the shared AIAgent instance, creating it on first call."""
     global _agent
-    if _agent is None:
-        hermes_cfg = _read_hermes_provider()
-        provider = hermes_cfg.get("provider")
-        kwargs = {"quiet_mode": True}
-        if provider:
-            kwargs["provider"] = provider
-        _agent = AIAgent(**kwargs)
+    if _agent is not None:
+        return _agent
+    with _agent_lock:
+        if _agent is None:
+            hermes_cfg = _read_hermes_provider()
+            provider = hermes_cfg.get("provider")
+            kwargs = {"quiet_mode": True}
+            if provider:
+                kwargs["provider"] = provider
+            _agent = AIAgent(**kwargs)
     return _agent
 
 
@@ -269,7 +262,7 @@ async def _stream_response(agent: AIAgent, message: str, comp_id: str, model: st
             break
         elif isinstance(delta, Exception):
             # Surface agent errors as a content chunk, then stop
-            yield _make_chunk(comp_id, model, {"content": f"\n[Error: {delta}]"})
+            yield _make_chunk(comp_id, model, {"content": "\n[Error: agent encountered an issue]"})
             yield _make_chunk(comp_id, model, {}, finish_reason="stop")
             yield "data: [DONE]\n\n"
             break
@@ -282,20 +275,98 @@ async def _stream_response(agent: AIAgent, message: str, comp_id: str, model: st
 # ---------------------------------------------------------------------------
 
 
+class _LimitBodyMiddleware:
+    """Reject requests with bodies larger than 1 MB to prevent memory exhaustion.
+
+    Counts actual bytes received (handles chunked transfer encoding),
+    not just the Content-Length header.
+    """
+
+    MAX_BODY = 1_048_576  # 1 MB
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] == "http":
+            bytes_received = 0
+
+            async def limited_receive():
+                nonlocal bytes_received
+                message = await receive()
+                if message.get("type") == "http.request":
+                    bytes_received += len(message.get("body", b""))
+                    if bytes_received > self.MAX_BODY:
+                        from starlette.responses import JSONResponse
+
+                        raise _BodyTooLarge()
+                return message
+
+            try:
+                await self.app(scope, limited_receive, send)
+            except _BodyTooLarge:
+                from starlette.responses import JSONResponse
+
+                resp = JSONResponse({"detail": "Request too large"}, status_code=413)
+                await resp(scope, receive, send)
+                return
+        else:
+            await self.app(scope, receive, send)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+class _RateLimiter:
+    """Simple in-memory sliding-window rate limiter.
+
+    Tracks requests per IP. Returns True if the request should be allowed.
+    """
+
+    def __init__(self, max_requests: int = 60, window_seconds: int = 60):
+        self._max = max_requests
+        self._window = window_seconds
+        self._requests: dict[str, collections.deque] = {}
+        self._lock = threading.Lock()
+
+    def allow(self, ip: str) -> bool:
+        now = time.time()
+        cutoff = now - self._window
+        with self._lock:
+            dq = self._requests.setdefault(ip, collections.deque())
+            # Evict expired entries
+            while dq and dq[0] < cutoff:
+                dq.popleft()
+            if len(dq) >= self._max:
+                return False
+            dq.append(now)
+            return True
+
+
+# Shared rate limiters
+_rate_limiter = _RateLimiter(max_requests=60, window_seconds=60)
+_auth_fail_limiter = _RateLimiter(max_requests=5, window_seconds=60)
+
+
 def create_app(token: str) -> FastAPI:
     app = FastAPI(title="Hermes Agent Bridge", version="1.0.0")
+    app.add_middleware(_LimitBodyMiddleware)
 
     # -- Health ----------------------------------------------------------
 
     @app.get("/health")
     async def health():
-        return {"status": "ok", "model": MODEL_ID}
+        return {"status": "ok"}
 
     # -- Models ----------------------------------------------------------
 
     @app.get("/v1/models")
-    async def list_models(authorization: Optional[str] = Header(None)):
-        verify_token(authorization, token)
+    async def list_models(request: Request, authorization: Optional[str] = Header(None)):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
         return {
             "object": "list",
             "data": [
@@ -315,7 +386,10 @@ def create_app(token: str) -> FastAPI:
         request: Request,
         authorization: Optional[str] = Header(None),
     ):
-        verify_token(authorization, token)
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
 
         try:
             body = await request.json()
@@ -375,9 +449,11 @@ def create_app(token: str) -> FastAPI:
             try:
                 result = await loop.run_in_executor(None, agent.chat, user_message)
             except Exception as exc:
+                import logging
+                logging.getLogger(__name__).exception("Agent error during chat completion")
                 raise HTTPException(
                     status_code=500,
-                    detail=f"Agent error: {exc}",
+                    detail="Agent error — check server logs",
                 )
             return JSONResponse(_make_completion(comp_id, model, result))
 
@@ -416,7 +492,7 @@ def main():
     print("=" * 56)
     print()
     print(f"  Local:  http://{args.host}:{port}/v1")
-    print(f"  Token:  {token}")
+    print(f"  Token:  {token[:8]}...{token[-4:]}")
     print()
     print("  For mobile access, run:")
     print(f"    tailscale serve {port}")

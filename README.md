@@ -37,7 +37,7 @@ cd hermes-bridge
 uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 fastapi uvicorn
 
 # 4. Start the bridge
-~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0
+~/.hermes/hermes-agent/venv/bin/python3 bridge.py
 ```
 
 > **Why Hermes's Python?** The bridge imports Hermes Agent directly as a library. It must run inside the same Python environment where Hermes is installed (`~/.hermes/hermes-agent/venv`). The Hermes installer includes `uv`, so step 3 should just work.
@@ -69,7 +69,7 @@ Paste `127.0.0.1` as the Bridge URL in AgentZero. The app handles the rest.
 iOS requires HTTPS. The simplest way is **Tailscale Serve** — it gives your machine a real HTTPS URL with a valid certificate, accessible over WiFi or cellular.
 
 1. Install [Tailscale](https://tailscale.com) on your computer and your phone (free for personal use)
-2. Start the bridge with `--host 0.0.0.0` (already in the Quick Start above)
+2. Start the bridge (it binds to localhost by default — Tailscale Serve connects via loopback)
 3. Enable HTTPS by running in a second terminal:
    ```bash
    tailscale serve 8642
@@ -84,14 +84,15 @@ iOS requires HTTPS. The simplest way is **Tailscale Serve** — it gives your ma
 > **Why Tailscale Serve?** iOS enforces HTTPS for all connections. Tailscale Serve auto-provisions a real CA-signed certificate for your machine — no self-signed certs, no port forwarding, no ATS issues. Works over WiFi and cellular.
 
 **Other options:**
-- **ngrok:** `ngrok http 8642` for a public HTTPS URL (free tier available)
-- **Reverse proxy:** Put it behind nginx/Caddy with HTTPS
+- **Reverse proxy:** Put it behind nginx/Caddy with a real TLS certificate
+
+> **Warning:** Do not use ngrok or similar public tunnel services. They expose your bridge to the entire internet — anyone who discovers the URL can attempt to interact with your Hermes Agent. Tailscale restricts access to your own devices only.
 
 ## Options
 
 ```bash
 ~/.hermes/hermes-agent/venv/bin/python3 bridge.py --port 9000        # Custom port (default: 8642)
-~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0     # Listen on all interfaces (default: 127.0.0.1)
+~/.hermes/hermes-agent/venv/bin/python3 bridge.py --host 0.0.0.0     # Listen on all interfaces (use with caution — exposes to LAN)
 ```
 
 ## API Reference
