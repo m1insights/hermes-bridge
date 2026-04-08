@@ -12,6 +12,7 @@ import asyncio
 import collections
 import hmac
 import json
+import logging
 import threading
 import secrets
 import stat
@@ -24,6 +25,18 @@ from typing import Optional
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 import uvicorn
+
+# Operator dependencies — optional, bridge works without them for basic chat
+try:
+    import httpx
+    from mcp_client import HermesMCPClient, MCPError
+    _OPERATOR_AVAILABLE = True
+except ImportError:
+    _OPERATOR_AVAILABLE = False
+if _OPERATOR_AVAILABLE:
+    from file_reader import read_memory, read_skills, read_skill, read_status
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Hermes Agent import
@@ -456,6 +469,332 @@ def create_app(token: str) -> FastAPI:
                     detail="Agent error — check server logs",
                 )
             return JSONResponse(_make_completion(comp_id, model, result))
+
+    # ==================================================================
+    # Hermes Operator — Control Plane Endpoints
+    # Requires: pip install httpx + mcp_client.py + file_reader.py
+    # If unavailable, bridge works normally for basic chat.
+    # ==================================================================
+
+    if not _OPERATOR_AVAILABLE:
+        logger.info("Operator dependencies not installed — control plane disabled. Install httpx for full operator support.")
+        return app
+
+    mcp_client = HermesMCPClient()
+
+    # Event distribution state
+    _event_buffer: collections.deque = collections.deque(maxlen=500)
+    _sse_subscribers: list[asyncio.Queue] = []
+    _event_poll_task: Optional[asyncio.Task] = None
+    _push_http_client: Optional[httpx.AsyncClient] = None
+
+    PUSH_RELAY_URL = "https://agentzero-backend.onrender.com/v1/push/relay"
+
+    def _require_mcp() -> None:
+        """Raise 503 if MCP client is not connected."""
+        if not mcp_client._initialized:
+            raise HTTPException(status_code=503, detail="MCP client not connected")
+
+    async def _send_push_nudge(event_type: str, approval_id: Optional[str] = None) -> None:
+        """Send a zero-content push nudge via the backend relay if a device token is registered."""
+        nonlocal _push_http_client
+        cfg = {}
+        if CONFIG_PATH.exists():
+            try:
+                cfg = json.loads(CONFIG_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                pass
+        device_token = cfg.get("device_token")
+        relay_secret = cfg.get("relay_secret")
+        if not device_token or not relay_secret:
+            return
+        if _push_http_client is None:
+            _push_http_client = httpx.AsyncClient(timeout=10.0)
+        body: dict = {"device_token": device_token, "event_type": event_type}
+        if approval_id:
+            body["approval_id"] = approval_id
+        try:
+            await _push_http_client.post(
+                PUSH_RELAY_URL,
+                json=body,
+                headers={"X-Relay-Secret": relay_secret},
+            )
+        except Exception:
+            logger.warning("Failed to send push nudge for event_type=%s", event_type)
+
+    async def _event_poll_loop() -> None:
+        """Background loop: poll MCP events every 300ms and distribute."""
+        last_event_id: Optional[str] = None
+        while True:
+            try:
+                await asyncio.sleep(0.3)
+                if not mcp_client._initialized:
+                    continue
+                try:
+                    events = await mcp_client.poll_events(since=last_event_id)
+                except MCPError:
+                    continue
+                if not events:
+                    continue
+                if isinstance(events, dict):
+                    events = events.get("events", [])
+                if not isinstance(events, list):
+                    continue
+                for event in events:
+                    _event_buffer.append(event)
+                    # Distribute to SSE subscribers
+                    dead: list[asyncio.Queue] = []
+                    for q in _sse_subscribers:
+                        try:
+                            q.put_nowait(event)
+                        except asyncio.QueueFull:
+                            dead.append(q)
+                    for q in dead:
+                        try:
+                            _sse_subscribers.remove(q)
+                        except ValueError:
+                            pass
+                    # Push nudge for certain event types
+                    etype = event.get("type", "") if isinstance(event, dict) else ""
+                    if etype in ("approval_requested", "run_completed", "run_failed"):
+                        asyncio.create_task(_send_push_nudge(
+                            etype,
+                            event.get("approval_id") if isinstance(event, dict) else None,
+                        ))
+                    # Track last event ID for pagination
+                    if isinstance(event, dict) and "id" in event:
+                        last_event_id = event["id"]
+            except asyncio.CancelledError:
+                return
+            except Exception:
+                logger.exception("Event poll loop error")
+                await asyncio.sleep(1.0)
+
+    @app.on_event("startup")
+    async def _startup_mcp():
+        nonlocal _event_poll_task
+        try:
+            await mcp_client.start()
+            logger.info("MCP client started")
+        except Exception:
+            logger.warning("MCP client failed to start — operator endpoints will return 503")
+        _event_poll_task = asyncio.create_task(_event_poll_loop())
+
+    @app.on_event("shutdown")
+    async def _shutdown_mcp():
+        nonlocal _event_poll_task, _push_http_client
+        if _event_poll_task and not _event_poll_task.done():
+            _event_poll_task.cancel()
+            try:
+                await _event_poll_task
+            except asyncio.CancelledError:
+                pass
+            _event_poll_task = None
+        await mcp_client.stop()
+        if _push_http_client:
+            await _push_http_client.aclose()
+            _push_http_client = None
+
+    # -- SSE Event Stream -----------------------------------------------
+
+    @app.get("/hermes/events/stream")
+    async def hermes_event_stream(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        _require_mcp()
+
+        queue: asyncio.Queue = asyncio.Queue(maxsize=200)
+        _sse_subscribers.append(queue)
+
+        async def event_generator():
+            try:
+                while True:
+                    try:
+                        event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                        yield f"data: {json.dumps(event)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            except asyncio.CancelledError:
+                return
+            finally:
+                try:
+                    _sse_subscribers.remove(queue)
+                except ValueError:
+                    pass
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
+
+    # -- Approvals -------------------------------------------------------
+
+    @app.get("/hermes/approvals")
+    async def hermes_list_approvals(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        _require_mcp()
+        result = await mcp_client.list_approvals()
+        return JSONResponse({"approvals": result})
+
+    @app.post("/hermes/approvals/{approval_id}/respond")
+    async def hermes_respond_approval(
+        approval_id: str,
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        _require_mcp()
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        action = body.get("action")
+        if action not in ("approve", "deny"):
+            raise HTTPException(status_code=400, detail="'action' must be 'approve' or 'deny'")
+        approved = action == "approve"
+        result = await mcp_client.respond_approval(approval_id, approved)
+        return JSONResponse({"result": result})
+
+    # -- Memory ----------------------------------------------------------
+
+    @app.get("/hermes/memory")
+    async def hermes_memory(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        return JSONResponse(read_memory())
+
+    # -- Skills ----------------------------------------------------------
+
+    @app.get("/hermes/skills")
+    async def hermes_skills(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        return JSONResponse({"skills": read_skills()})
+
+    @app.get("/hermes/skills/{skill_name}")
+    async def hermes_skill(
+        skill_name: str,
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        skill = read_skill(skill_name)
+        if skill is None:
+            raise HTTPException(status_code=404, detail=f"Skill '{skill_name}' not found")
+        return JSONResponse(skill)
+
+    # -- Conversations ---------------------------------------------------
+
+    @app.get("/hermes/conversations")
+    async def hermes_conversations(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        _require_mcp()
+        result = await mcp_client.list_conversations()
+        return JSONResponse({"conversations": result})
+
+    @app.get("/hermes/conversations/{conversation_id}")
+    async def hermes_conversation(
+        conversation_id: str,
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        _require_mcp()
+        result = await mcp_client.get_conversation(conversation_id)
+        return JSONResponse(result)
+
+    # -- Status ----------------------------------------------------------
+
+    @app.get("/hermes/status")
+    async def hermes_status(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        status = read_status()
+        status["mcp_connected"] = mcp_client._initialized
+        return JSONResponse(status)
+
+    # -- Push Registration -----------------------------------------------
+
+    @app.post("/hermes/push/register")
+    async def hermes_push_register(
+        request: Request,
+        authorization: Optional[str] = Header(None),
+    ):
+        ip = _client_ip(request)
+        if not _rate_limiter.allow(ip):
+            raise HTTPException(status_code=429, detail="Rate limit exceeded")
+        verify_token(authorization, token, client_ip=ip)
+        try:
+            body = await request.json()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid JSON body")
+        device_token = body.get("device_token")
+        relay_secret = body.get("relay_secret")
+        if not device_token or not isinstance(device_token, str):
+            raise HTTPException(status_code=400, detail="'device_token' is required (string)")
+        if not relay_secret or not isinstance(relay_secret, str):
+            raise HTTPException(status_code=400, detail="'relay_secret' is required (string)")
+        # Persist to bridge.json
+        config = {}
+        if CONFIG_PATH.exists():
+            try:
+                config = json.loads(CONFIG_PATH.read_text())
+            except (json.JSONDecodeError, OSError):
+                config = {}
+        config["device_token"] = device_token
+        config["relay_secret"] = relay_secret
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = CONFIG_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(config, indent=2) + "\n")
+        tmp.chmod(stat.S_IRUSR | stat.S_IWUSR)
+        tmp.replace(CONFIG_PATH)
+        return JSONResponse({"status": "registered"})
 
     return app
 
