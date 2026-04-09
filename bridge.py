@@ -505,8 +505,7 @@ def create_app(token: str) -> FastAPI:
             except (json.JSONDecodeError, OSError):
                 pass
         device_token = cfg.get("device_token")
-        relay_secret = os.environ.get("PUSH_RELAY_SECRET", "")
-        if not device_token or not relay_secret:
+        if not device_token:
             return
         if _push_http_client is None:
             _push_http_client = httpx.AsyncClient(timeout=10.0)
@@ -517,7 +516,7 @@ def create_app(token: str) -> FastAPI:
             await _push_http_client.post(
                 PUSH_RELAY_URL,
                 json=body,
-                headers={"X-Relay-Secret": relay_secret},
+                headers={"Content-Type": "application/json"},
             )
         except Exception:
             logger.warning("Failed to send push nudge for event_type=%s", event_type)
