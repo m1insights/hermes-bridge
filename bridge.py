@@ -505,7 +505,7 @@ def create_app(token: str) -> FastAPI:
             except (json.JSONDecodeError, OSError):
                 pass
         device_token = cfg.get("device_token")
-        relay_secret = cfg.get("relay_secret")
+        relay_secret = os.environ.get("PUSH_RELAY_SECRET", "")
         if not device_token or not relay_secret:
             return
         if _push_http_client is None:
@@ -775,11 +775,8 @@ def create_app(token: str) -> FastAPI:
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid JSON body")
         device_token = body.get("device_token")
-        relay_secret = body.get("relay_secret")
         if not device_token or not isinstance(device_token, str):
             raise HTTPException(status_code=400, detail="'device_token' is required (string)")
-        if not relay_secret or not isinstance(relay_secret, str):
-            raise HTTPException(status_code=400, detail="'relay_secret' is required (string)")
         # Persist to bridge.json
         config = {}
         if CONFIG_PATH.exists():
@@ -788,7 +785,6 @@ def create_app(token: str) -> FastAPI:
             except (json.JSONDecodeError, OSError):
                 config = {}
         config["device_token"] = device_token
-        config["relay_secret"] = relay_secret
         CONFIG_DIR.mkdir(parents=True, exist_ok=True)
         tmp = CONFIG_PATH.with_suffix(".tmp")
         tmp.write_text(json.dumps(config, indent=2) + "\n")
