@@ -16,7 +16,7 @@ Your Machine (hermes-bridge)
 Hermes Agent (memory, skills, tools)
 ```
 
-The bridge is a single Python file (~350 lines) that:
+The bridge is a single Python file (~850 lines) that:
 1. Imports Hermes Agent's `AIAgent` class directly
 2. Serves an OpenAI-compatible API with SSE streaming
 3. Authenticates requests with an auto-generated Bearer token
@@ -34,7 +34,7 @@ git clone https://github.com/m1insights/hermes-bridge.git
 cd hermes-bridge
 
 # 3. Install bridge dependencies into Hermes's environment
-uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 fastapi uvicorn
+uv pip install --python ~/.hermes/hermes-agent/venv/bin/python3 fastapi uvicorn httpx
 
 # 4. Start the bridge
 ~/.hermes/hermes-agent/venv/bin/python3 bridge.py
@@ -97,7 +97,7 @@ iOS requires HTTPS. The simplest way is **Tailscale Serve** — it gives your ma
 
 ## API Reference
 
-The bridge exposes three endpoints:
+The bridge exposes three core endpoints:
 
 | Endpoint | Method | Auth | Description |
 |----------|--------|------|-------------|
@@ -106,6 +106,32 @@ The bridge exposes three endpoints:
 | `/v1/chat/completions` | POST | Yes | Chat (streaming + non-streaming) |
 
 All authenticated endpoints require `Authorization: Bearer <token>`.
+
+### Operator Endpoints (Pro)
+
+These endpoints power the Hermes Operator mobile command center in AgentZero. They require the optional `httpx` dependency (`pip install httpx`). If httpx is not installed, the bridge runs normally for basic chat.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/hermes/events/stream` | GET | SSE event stream (approvals, state changes) |
+| `/hermes/approvals` | GET | List pending approval requests |
+| `/hermes/approvals/{id}/respond` | POST | Approve or deny a request |
+| `/hermes/memory` | GET | Read MEMORY.md and USER.md |
+| `/hermes/skills` | GET | List installed skills |
+| `/hermes/skills/{name}` | GET | Get skill detail |
+| `/hermes/conversations` | GET | List Hermes conversations |
+| `/hermes/conversations/{id}` | GET | Get conversation detail |
+| `/hermes/status` | GET | Agent status + MCP connection |
+| `/hermes/push/register` | POST | Register device for push notifications |
+
+All operator endpoints use the same bearer token as chat endpoints.
+
+**Dependencies for operator mode:**
+```bash
+pip install httpx
+```
+
+The bridge also needs `mcp_client.py` and `file_reader.py` in the same directory. These are included in the repo.
 
 The `/v1/chat/completions` endpoint accepts the standard OpenAI request format:
 
