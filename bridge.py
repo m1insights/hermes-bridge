@@ -3,7 +3,7 @@
 Hermes Agent Bridge — OpenAI-compatible HTTP wrapper for Hermes Agent.
 
 Exposes Hermes Agent (NousResearch) as an OpenAI-compatible API so that
-any client expecting /v1/chat/completions (including AgentZero's BYOK system)
+any client expecting /v1/chat/completions (including PromptCloak's BYOK system)
 can talk to a local Hermes Agent instance over HTTP.
 """
 
@@ -830,7 +830,7 @@ def main():
     print()
     print("  For mobile access, run:")
     print(f"    tailscale serve {port}")
-    print("  Then use your https://<machine>.ts.net URL in AgentZero.")
+    print("  Then use your https://<machine>.ts.net URL in PromptCloak.")
     print()
     print("=" * 56)
 

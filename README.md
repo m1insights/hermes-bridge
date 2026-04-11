@@ -1,15 +1,15 @@
 # Hermes Bridge
 
-OpenAI-compatible HTTP wrapper for [Hermes Agent](https://hermes-agent.nousresearch.com). Chat with your Hermes Agent from [AgentZero](https://m1labs.io/apps/agent-zero) (or any OpenAI-compatible client) over HTTP.
+OpenAI-compatible HTTP wrapper for [Hermes Agent](https://hermes-agent.nousresearch.com). Chat with your Hermes Agent from [PromptCloak](https://m1labs.io/apps/promptcloak) (or any OpenAI-compatible client) over HTTP.
 
 **Why?** Hermes Agent is a CLI tool — it doesn't expose an HTTP API. This bridge wraps it as a standard `/v1/chat/completions` endpoint so mobile apps, editors, and other tools can talk to it.
 
-**Why AgentZero?** Unlike Telegram or Discord, AgentZero routes messages directly from your device to your server. No third-party messaging platform in the data path. No account required. Optional PII scrubbing. [Learn more](https://m1labs.io/apps/agent-zero/setup-hermes).
+**Why PromptCloak?** Unlike Telegram or Discord, PromptCloak routes messages directly from your device to your server. No third-party messaging platform in the data path. No account required. Optional PII scrubbing. [Learn more](https://m1labs.io/apps/promptcloak/setup-hermes).
 
 ## How It Works
 
 ```
-iPhone/iPad/Mac (AgentZero)
+iPhone/iPad/Mac (PromptCloak)
     ↓ HTTPS (Bearer token)
 Your Machine (hermes-bridge)
     ↓ Python import
@@ -52,17 +52,17 @@ The bridge prints a URL and token on startup:
   URL:    http://127.0.0.1:8642/v1
   Token:  <your-auto-generated-token>
 
-  Paste these into AgentZero > Settings > Providers
+  Paste these into PromptCloak > Settings > Providers
   to connect via BYOK (OpenAI-compatible).
 
 ========================================================
 ```
 
-## Connect AgentZero
+## Connect PromptCloak
 
 ### From your Mac (same machine)
 
-Paste `127.0.0.1` as the Bridge URL in AgentZero. The app handles the rest.
+Paste `127.0.0.1` as the Bridge URL in PromptCloak. The app handles the rest.
 
 ### From your iPhone or iPad
 
@@ -75,7 +75,7 @@ iOS requires HTTPS. The simplest way is **Tailscale Serve** — it gives your ma
    tailscale serve 8642
    ```
    This prints a URL like `https://my-mac.tail1234.ts.net`
-4. In AgentZero, go to **Settings > Providers > Hermes Agent**
+4. In PromptCloak, go to **Settings > Providers > Hermes Agent**
 5. Paste your **`.ts.net` hostname** (e.g., `my-mac.tail1234.ts.net`) as the Bridge URL
 6. Paste the **Bridge Token** from the terminal
 7. Tap **Verify & Save**
@@ -109,7 +109,7 @@ All authenticated endpoints require `Authorization: Bearer <token>`.
 
 ### Operator Endpoints (Pro)
 
-These endpoints power the Hermes Operator mobile command center in AgentZero. They require the optional `httpx` dependency (`pip install httpx`). If httpx is not installed, the bridge runs normally for basic chat.
+These endpoints power the Hermes Operator mobile command center in PromptCloak. They require the optional `httpx` dependency (`pip install httpx`). If httpx is not installed, the bridge runs normally for basic chat.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|

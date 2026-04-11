@@ -2,7 +2,7 @@
 Hermes MCP Client — JSON-RPC stdio transport for Hermes Agent's MCP server.
 
 Spawns `hermes mcp serve` as a subprocess and communicates via JSON-RPC 2.0
-over stdin/stdout. Provides async methods for the AgentZero control plane
+over stdin/stdout. Provides async methods for the PromptCloak control plane
 (approvals, events, conversations, messages).
 """
 
